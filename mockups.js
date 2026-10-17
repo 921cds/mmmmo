@@ -74,6 +74,11 @@
   const year = new Date().getFullYear();
 
   const templates = {
+    // An empty frame to build your own mockup on; its size lives in item.props.size.
+    blank: {
+      name: '빈 목업', group: '기본', w: 400, h: 400, r: 0, bg: 'white', blank: true,
+      els: c => [BG(c.W, c.H, 'bg')],
+    },
     'card-front': {
       name: '명함 · 앞면', group: '인쇄', w: 350, h: 200, r: 8, bg: 'primary',
       els: () => [BG(350, 200, 'bg'), L(95, 55, 160, 90)],
@@ -238,6 +243,17 @@
   };
 
   const groups = ['인쇄', '디지털', '굿즈 · 공간'];
+  const BLANK_SIZES = [
+    ['정사각형 1:1', 400, 400], ['세로 4:5', 400, 500], ['스토리 9:16', 360, 640],
+    ['가로 16:9', 640, 360], ['A4', 420, 594], ['명함', 350, 200],
+  ];
+
+  // Template units of a mockup: the template's own size, or the custom size of a blank one.
+  function dims(item) {
+    const tpl = templates[item.template] || templates['card-front'];
+    const s = (item.props || {}).size;
+    return { w: (s && s.w) || tpl.w, h: (s && s.h) || tpl.h, r: tpl.r };
+  }
 
   /* ---------- context + elements ---------- */
 
@@ -252,8 +268,9 @@
     if (logoMode === 'auto') logoMode = dark ? 'white' : 'original';
     const rawName = brand.name || 'Brand';
     const rawTag = brand.tagline || '';
+    const d = dims(item);
     return {
-      b: brand, id: String(item.id).replace(/[^a-z0-9]/gi, ''),
+      b: brand, id: String(item.id).replace(/[^a-z0-9]/gi, ''), W: d.w, H: d.h,
       bg, fg: dark ? '#FFFFFF' : INK, accent, onAccent: onColor(accent),
       logoHref, logoMode, logoScale: p.logoScale ?? 1,
       rawName, rawTag, name: esc(rawName), slug: slug(rawName),
@@ -379,7 +396,8 @@
 
   // opts: { logo: href, asset: id => href, size: {w, h} }
   function render(item, brand, opts = {}) {
-    const { c, tpl, list } = elements(item, brand, opts.logo || null);
+    const { c, list } = elements(item, brand, opts.logo || null);
+    const tpl = dims(item);
     const o = { ...opts, byId: new Map(list.map(e => [e.id, e])) };
     const wh = opts.size ? `width="${opts.size.w}" height="${opts.size.h}"` : 'width="100%" height="100%"';
     const body = list.filter(e => !e.hidden).map(e => {
@@ -396,5 +414,5 @@
     </svg>`;
   }
 
-  window.Mockups = { templates, groups, render, elements, elBox, imageContent, paint, colorOf, isDark, onColor, slug, fontStack, SWATCH };
+  window.Mockups = { templates, groups, BLANK_SIZES, dims, render, elements, elBox, imageContent, paint, colorOf, isDark, onColor, slug, fontStack, SWATCH };
 })();

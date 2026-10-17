@@ -69,7 +69,7 @@
   const propsEl = $('#props'), layersEl = $('#layers');
 
   function freshBoard() {
-    return { title: '브랜드 목업 보드', canvasBg: '#F5F5F5', brand: { ...DEFAULT_BRAND }, items: [], assets: {} };
+    return { title: '브랜드 목업 보드', canvasBg: '#F5F5F5', brand: { ...DEFAULT_BRAND }, items: [], userTemplates: [], assets: {} };
   }
   function normalize(o) {
     if (!o || !Array.isArray(o.items)) return null;
@@ -78,6 +78,7 @@
       canvasBg: o.canvasBg || '#F5F5F5',
       brand: { ...DEFAULT_BRAND, ...(o.brand || {}) },
       items: o.items.filter(i => i && i.id && ['note', 'image', 'mockup'].includes(i.type)),
+      userTemplates: Array.isArray(o.userTemplates) ? o.userTemplates.filter(t => t && t.id && M.templates[t.template]) : [],
       assets: o.assets || {},
     };
   }
@@ -160,7 +161,7 @@
 
   /* ---------- history + persistence ---------- */
 
-  const snap = () => JSON.stringify({ items: state.items, brand: state.brand, title: state.title, canvasBg: state.canvasBg });
+  const snap = () => JSON.stringify({ items: state.items, userTemplates: state.userTemplates, brand: state.brand, title: state.title, canvasBg: state.canvasBg });
 
   function commit() {
     const s = snap();
@@ -204,10 +205,10 @@
   }
 
   function serialize() {
-    const used = new Set([state.brand.logo, ...state.items.flatMap(itemAssets)].filter(Boolean));
+    const used = new Set([state.brand.logo, ...state.items.concat(state.userTemplates).flatMap(itemAssets)].filter(Boolean));
     const assets = {};
     used.forEach(id => { if (state.assets[id]) assets[id] = state.assets[id]; });
-    return { app: 'brand-mockup-board', version: 1, title: state.title, canvasBg: state.canvasBg, brand: state.brand, items: state.items, assets };
+    return { app: 'brand-mockup-board', version: 1, title: state.title, canvasBg: state.canvasBg, brand: state.brand, items: state.items, userTemplates: state.userTemplates, assets };
   }
   let saveTimer = null, viewTimer = null, warnedQuota = false;
   function scheduleSave() {
@@ -319,11 +320,11 @@
   const getElement = (it, elId) => (it && elId ? mockupInfo(it).list.find(e => e.id === elId) : null);
 
   function toTpl(it, p) {
-    const s = M.templates[it.template].w / it.w;
+    const s = M.dims(it).w / it.w;
     return { x: (p.x - it.x) * s, y: (p.y - it.y) * s };
   }
   function tplToScreen(it, b) {
-    const k = it.w / M.templates[it.template].w;
+    const k = it.w / M.dims(it).w;
     const { x: vx, y: vy, zoom: z } = state.view;
     return { x: (it.x + b.x * k) * z + vx, y: (it.y + b.y * k) * z + vy, w: b.w * k * z, h: b.h * k * z };
   }
@@ -378,7 +379,7 @@
 
   function reorderElement(it, elId, dir) {
     const list = mockupInfo(it).list;
-    const t = M.templates[it.template];
+    const t = M.dims(it);
     // Never slide below a locked background that fills most of the mockup.
     let floor = 0;
     list.forEach((x, i) => { if (x.locked && x.w * x.h >= t.w * t.h * 0.5) floor = i + 1; });
@@ -439,7 +440,7 @@
   }
   function addElement(kind, extra = {}) {
     const it = byId(mEdit.id);
-    const t = M.templates[it.template];
+    const t = M.dims(it);
     const id = kind[0] + '_' + uid();
     const cx = extra.at ? extra.at.x : t.w / 2, cy = extra.at ? extra.at.y : t.h / 2;
     const s = Math.round(Math.min(t.w, t.h) / 4);
@@ -553,7 +554,7 @@
         body.innerHTML = M.render(it, b, { logo, asset: assetURL, crop });
         el.firstChild.textContent = tpl.name;
       }
-      body.style.borderRadius = (tpl.r * it.w / tpl.w) + 'px';
+      body.style.borderRadius = (tpl.r * it.w / M.dims(it).w) + 'px';
     }
     return el;
   }
@@ -658,15 +659,26 @@
     return it;
   }
 
-  function addMockup(key, at) {
-    const tpl = M.templates[key];
-    const c = at || viewCenterWorld();
-    const it = { id: uid(), type: 'mockup', template: key, x: Math.round(c.x - tpl.w / 2), y: Math.round(c.y - tpl.h / 2), w: tpl.w, h: tpl.h, props: {} };
+  function addMockup(key, props = {}) {
+    const d = M.dims({ template: key, props });
+    const c = viewCenterWorld();
+    const it = { id: uid(), type: 'mockup', template: key, x: Math.round(c.x - d.w / 2), y: Math.round(c.y - d.h / 2), w: d.w, h: d.h, props: clone(props) };
     state.items.push(it);
     selection = new Set([it.id]);
     renderAll();
     commit();
     return it;
+  }
+
+  // A saved template is a snapshot of an edited mockup: its base template plus all edits.
+  function saveAsTemplate(it) {
+    const base = M.templates[it.template];
+    const name = (prompt('템플릿 이름을 입력하세요', `${base.name} 변형`) || '').trim();
+    if (!name) return;
+    if (mEdit && mEdit.crop) setCrop(null);
+    state.userTemplates = [...state.userTemplates, { id: 'ut_' + uid(), name, template: it.template, props: clone(it.props || {}) }];
+    commit();
+    toast(`'${name}' 템플릿을 저장했어요. 목업 메뉴의 '내 템플릿'에 있어요`);
   }
 
   async function addImages(files, at) {
@@ -835,9 +847,9 @@
   }
 
   async function exportPNG(it) {
-    const tpl = M.templates[it.template];
+    const d = M.dims(it);
     const scale = 3;
-    const size = { w: tpl.w * scale, h: tpl.h * scale };
+    const size = { w: d.w * scale, h: d.h * scale };
     const markup = M.render(it, state.brand, { logo: state.assets[state.brand.logo] || null, asset: id => state.assets[id], size });
     const url = URL.createObjectURL(new Blob([markup], { type: 'image/svg+xml;charset=utf-8' }));
     try {
@@ -896,7 +908,28 @@
 
   function buildMockupMenu() {
     const logo = assetURL(state.brand.logo);
-    $('#mockup-menu').innerHTML = M.groups.map(g => `
+    const blank = `
+      <div class="menu-title">빈 목업 <span class="menu-hint">원하는 비율의 빈 프레임에 직접 디자인해요</span></div>
+      <div class="menu-grid">${M.BLANK_SIZES.map(([label, w, h]) => `
+        <button class="mock-card" data-blank="${w}x${h}">
+          <div class="mock-thumb"><div class="blank-thumb" style="aspect-ratio:${w}/${h}"></div></div>
+          <span>${label}</span>
+        </button>`).join('')}
+        <button class="mock-card" data-blank="custom">
+          <div class="mock-thumb"><div class="blank-thumb custom">${ICON.plus}</div></div>
+          <span>직접 입력</span>
+        </button>
+      </div>`;
+    const mine = state.userTemplates.length ? `
+      <div class="menu-title">내 템플릿</div>
+      <div class="menu-grid">${state.userTemplates.map(t => `
+        <div class="mock-card" data-user="${t.id}" role="button" tabindex="0">
+          <div class="mock-thumb">${M.render({ id: 'pv' + t.id, template: t.template, props: t.props }, state.brand, { logo, asset: assetURL })}</div>
+          <span>${esc(t.name)}</span>
+          <button class="card-del" data-del="${t.id}" title="템플릿 삭제">${ICON.trash}</button>
+        </div>`).join('')}
+      </div>` : '';
+    const builtIn = M.groups.map(g => `
       <div class="menu-title">${g}</div>
       <div class="menu-grid">${Object.entries(M.templates).filter(([, t]) => t.group === g).map(([k, t]) => `
         <button class="mock-card" data-template="${k}">
@@ -904,6 +937,7 @@
           <span>${t.name}</span>
         </button>`).join('')}
       </div>`).join('');
+    $('#mockup-menu').innerHTML = blank + mine + builtIn;
   }
   function toggleMockupMenu(force) {
     const m = $('#mockup-menu');
@@ -1027,10 +1061,15 @@
     const known = MOCKUP_BGS.some(([k]) => k === bg);
     const mode = p.logoMode || 'auto';
     const scale = Math.round((p.logoScale ?? 1) * 100);
-    const options = M.groups.map(g => `<optgroup label="${g}">${Object.entries(M.templates).filter(([, t]) => t.group === g).map(([k, t]) => `<option value="${k}"${k === it.template ? ' selected' : ''}>${t.name}</option>`).join('')}</optgroup>`).join('');
+    const options = ['기본', ...M.groups].map(g => `<optgroup label="${g}">${Object.entries(M.templates).filter(([, t]) => t.group === g).map(([k, t]) => `<option value="${k}"${k === it.template ? ' selected' : ''}>${t.name}</option>`).join('')}</optgroup>`).join('');
+    const d = M.dims(it);
+    const frame = tpl.blank ? sec('프레임 크기', `<div class="grid2">${num('W', 'frame-w', d.w)}${num('H', 'frame-h', d.h)}</div>
+        <p class="hint">비율을 바꾸면 캔버스의 크기도 함께 맞춰져요.</p>`) : '';
     return sec('목업', `<select class="field" data-field="template">${options}</select>
         <button class="btn btn-primary" data-action="edit-mockup" style="margin-top:8px">${ICON.edit}디자인 편집</button>
-        <p class="hint">더블클릭해도 편집할 수 있어요. 로고·글자·도형을 하나씩 옮기고 바꿀 수 있어요.</p>`)
+        <button class="btn" data-action="save-template">${ICON.copy}템플릿으로 저장</button>
+        <p class="hint">더블클릭해도 편집할 수 있어요. 고친 목업은 템플릿으로 저장해 목업 메뉴에서 다시 쓸 수 있어요.</p>`)
+      + frame
       + sec('바탕 색', `<div class="swatches">${MOCKUP_BGS.map(([k, l]) => swatch('bg', k, M.colorOf(k, state.brand), l, bg === k)).join('')}
           <label class="swatch custom${!known ? ' active' : ''}" style="--c:${known ? '#fff' : bg}" title="직접 선택">${ICON.plus}<input type="color" data-field="bgCustom" value="${known ? M.colorOf(bg, state.brand) : bg}"></label></div>`)
       + sec('로고', `
@@ -1125,7 +1164,8 @@
           <button class="icon-btn" data-action="el-toggle" data-value="${esc(x.id)}" title="${x.hidden ? '보이기' : '숨기기'}">${x.hidden ? ICON.eyeOff : ICON.eye}</button>
         </li>`).join('')}</ul>
       <div class="add-row">${[['text', '텍스트'], ['rect', '사각형'], ['ellipse', '원'], ['image', '이미지']].map(([k, l]) => `<button class="btn" data-action="el-add" data-value="${k}">${ICON['k-' + k]}${l}</button>`).join('')}</div>`);
-    h += sec('', `<button class="btn" data-action="el-reset-all">${ICON.reset}이 목업의 수정 모두 되돌리기</button>`);
+    h += sec('', `<button class="btn" data-action="save-template">${ICON.copy}템플릿으로 저장</button>
+      <button class="btn" data-action="el-reset-all">${ICON.reset}이 목업의 수정 모두 되돌리기</button>`);
     return h;
   }
 
@@ -1278,11 +1318,22 @@
       case 'font': notes.forEach(x => { x.font = raw; }); break;
       case 'color': notes.forEach(x => { x.color = raw; }); break;
       case 'template': {
-        const t0 = M.templates[one.template], t1 = M.templates[raw];
+        const t0 = M.dims(one), t1 = M.templates[raw];
         const s = one.w / t0.w;
         one.template = raw;
+        if (one.props && one.props.size) one.props = { ...one.props, size: undefined };
         one.w = Math.round(t1.w * s);
         one.h = Math.round(t1.h * s);
+        break;
+      }
+      case 'frame-w': case 'frame-h': {
+        if (!final) return;
+        const v = Math.round(+raw);
+        if (!(v > 0)) return;
+        const d = M.dims(one);
+        const size = { w: field === 'frame-w' ? v : d.w, h: field === 'frame-h' ? v : d.h };
+        one.props = { ...one.props, size };
+        one.h = Math.round(one.w * size.h / size.w);
         break;
       }
       case 'bgCustom': one.props = { ...one.props, bg: raw }; break;
@@ -1299,7 +1350,7 @@
     updatePropsValues();
     if (final) {
       commit();
-      if (['template', 'bgCustom', 'color', 'w', 'h'].includes(field)) renderProps();
+      if (['template', 'bgCustom', 'color', 'w', 'h', 'frame-w', 'frame-h'].includes(field)) renderProps();
     }
   }
 
@@ -1356,6 +1407,7 @@
     const one = sel[0];
     const notes = sel.filter(i => i.type === 'note');
     switch (action) {
+      case 'save-template': saveAsTemplate(one); return;
       case 'edit-mockup': startMockupEdit(one.id); return;
       case 'fill': notes.forEach(n => { n.fill = v; }); break;
       case 'color': notes.forEach(n => { n.color = v; }); break;
@@ -1579,7 +1631,7 @@
       return;
     }
     if (drag.mode === 'el-move') {
-      const px = it.w / M.templates[it.template].w * state.view.zoom;
+      const px = it.w / M.dims(it).w * state.view.zoom;
       if (!drag.moved && Math.hypot(dx, dy) * px < 2) return;
       drag.moved = true;
       setEl(it, drag.elId, { x: r1(drag.orig.x + dx), y: r1(drag.orig.y + dy) });
@@ -1855,11 +1907,43 @@
   $('#tool-image').addEventListener('click', () => { closeMenus(); $('#file-image').click(); });
   $('#tool-mockup').addEventListener('click', e => { e.stopPropagation(); toggleMockupMenu(); });
   $('#mockup-menu').addEventListener('click', e => {
-    const card = e.target.closest('[data-template]');
+    const del = e.target.closest('[data-del]');
+    if (del) {
+      const t = state.userTemplates.find(x => x.id === del.dataset.del);
+      if (t && confirm(`'${t.name}' 템플릿을 삭제할까요?`)) {
+        state.userTemplates = state.userTemplates.filter(x => x.id !== t.id);
+        commit();
+        buildMockupMenu();
+      }
+      return;
+    }
+    const card = e.target.closest('[data-template], [data-blank], [data-user]');
     if (!card) return;
+    let key = card.dataset.template, props = {};
+    if (card.dataset.blank) {
+      let [w, h] = card.dataset.blank.split('x').map(Number);
+      if (card.dataset.blank === 'custom') {
+        const v = prompt('프레임 크기를 가로 × 세로로 입력하세요 (예: 1080x1350)', '1080x1080');
+        const m = v && v.match(/(\d+(?:\.\d+)?)\s*[x×*,\s]\s*(\d+(?:\.\d+)?)/i);
+        if (!m) return;
+        [w, h] = [+m[1], +m[2]];
+        // Keep custom frames a comfortable size on the canvas; the ratio is what matters.
+        const s = 500 / Math.max(w, h);
+        [w, h] = [Math.round(w * s), Math.round(h * s)];
+      }
+      if (!(w > 0 && h > 0)) return;
+      key = 'blank';
+      props = { size: { w, h } };
+    } else if (card.dataset.user) {
+      const t = state.userTemplates.find(x => x.id === card.dataset.user);
+      if (!t) return;
+      key = t.template;
+      props = t.props;
+    }
     toggleMockupMenu(false);
     setTool('move');
-    addMockup(card.dataset.template);
+    const it = addMockup(key, props);
+    if (key === 'blank') startMockupEdit(it.id);
   });
 
   $('#file-image').addEventListener('change', e => { addImages(e.target.files, viewCenterWorld()); e.target.value = ''; });
@@ -1912,7 +1996,11 @@
     const cmd = b.dataset.cmd;
     if (cmd === 'new') {
       if (!confirm('현재 보드를 지우고 새 보드를 시작할까요?\n필요하면 먼저 보드 파일로 저장하세요.')) return;
-      replaceBoard(freshBoard());
+      // Saved templates (and the pictures they use) carry over to the new board.
+      const next = freshBoard();
+      next.userTemplates = state.userTemplates;
+      state.userTemplates.flatMap(itemAssets).forEach(id => { next.assets[id] = state.assets[id]; });
+      replaceBoard(next);
       seed();
       lastSnap = snap();
       saveNow();
