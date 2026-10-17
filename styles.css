@@ -135,6 +135,16 @@ body.dark-canvas .item-label { color: #9A9A9A; }
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+/* mockup edit mode */
+.edit-frame, .el-hover { position: absolute; }
+.edit-frame { border: 1px dashed var(--accent); }
+.el-hover { border: 1px solid var(--accent); opacity: .5; }
+#viewport.mock-editing .item:not(.editing-mockup) { opacity: .35; }
+#viewport.mock-editing .item:not(.editing-mockup):hover { outline: none; }
+#viewport.mock-editing .item.editing-mockup { outline: none; }
+.editing-mockup [data-el] { cursor: move; }
+.editing-mockup .item-label { color: var(--accent); }
+
 #marquee {
   position: absolute;
   display: none;
@@ -459,6 +469,44 @@ input[type=number] { -moz-appearance: textfield; }
   font-variant-numeric: tabular-nums;
 }
 .color-row .tag { padding-right: 6px; color: var(--text-3); font-size: 11px; }
+
+/* mockup element panel */
+.sel-head.row-between { display: flex; align-items: center; justify-content: space-between; padding-right: 12px; }
+.btn-chip {
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+.btn-chip:hover { background: var(--accent-hover); }
+.btn-row .btn { flex: 1; }
+.btn-row .btn + .btn { margin: 0 0 0 6px; }
+.el-list { list-style: none; margin: 0 -8px; padding: 0; }
+.el-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 2px 0 8px;
+  border-radius: 5px;
+}
+.el-row:hover { background: var(--hover); }
+.el-row.selected { background: var(--accent-weak); }
+.el-row > svg { width: 14px; height: 14px; color: var(--text-2); }
+.el-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.el-row .icon-btn { width: 24px; height: 24px; opacity: 0; color: var(--text-2); }
+.el-row .icon-btn svg { width: 14px; height: 14px; }
+.el-row:hover .icon-btn, .el-row.is-hidden .icon-btn { opacity: 1; }
+.el-row.is-hidden span { color: var(--text-3); }
+.add-row { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 10px; }
+.add-row .btn { margin: 0; height: 30px; font-size: 11px; }
+.add-row .btn svg { width: 14px; height: 14px; }
+.check { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-2); }
+.num input[readonly] { color: var(--text-3); }
+.section > .field + .row { margin-top: 8px; }
 
 /* layers */
 .layers { list-style: none; margin: 0; padding: 6px; }

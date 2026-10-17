@@ -49,7 +49,17 @@
     'a-top': svg('<path d="M3 4h14M6 7h3v8H6zM11 7h3v5h-3z"/>'),
     'a-vcenter': svg('<path d="M3 10h14M6 5h3v10H6zM11 7h3v6h-3z"/>'),
     'a-bottom': svg('<path d="M3 16h14M6 5h3v8H6zM11 8h3v5h-3z"/>'),
+    eye: svg('<path d="M2.5 10s2.8-5 7.5-5 7.5 5 7.5 5-2.8 5-7.5 5-7.5-5-7.5-5z"/><circle cx="10" cy="10" r="2"/>'),
+    eyeOff: svg('<path d="M2.5 10s2.8-5 7.5-5 7.5 5 7.5 5-2.8 5-7.5 5-7.5-5-7.5-5z"/><path d="M4 16 16 4"/>'),
+    reset: svg('<path d="M4.6 8A6 6 0 1 1 4 11"/><path d="M4 4v4h4"/>'),
+    edit: svg('<path d="M12.5 4.5l3 3L8 15H5v-3z"/><path d="M11 6l3 3"/>'),
+    'k-text': svg('<path d="M5 5h10M10 5v10"/>'),
+    'k-rect': svg('<rect x="4" y="4" width="12" height="12" rx="1"/>'),
+    'k-ellipse': svg('<circle cx="10" cy="10" r="6"/>'),
+    'k-shape': svg('<path d="M10 3.5 16.5 15.5h-13z"/>'),
   };
+  ICON['k-logo'] = ICON.logo;
+  ICON['k-image'] = ICON.image;
 
   /* ---------- state ---------- */
 
@@ -94,6 +104,7 @@
   const assetURLs = new Map();
   const history = { past: [], future: [] };
   let lastSnap = null;
+  let mEdit = null; // mockup being edited: { id, el: selected element id, hover }
 
   const byId = id => state.items.find(i => i.id === id);
   const selectedItems = () => state.items.filter(i => selection.has(i.id));
@@ -181,8 +192,17 @@
     scheduleSave();
   }
 
+  // Asset ids an item uses, including images placed inside a mockup.
+  function itemAssets(it) {
+    const ids = [it.src];
+    const p = it.props || {};
+    (p.extra || []).forEach(e => ids.push(e.src));
+    Object.values(p.ov || {}).forEach(o => ids.push(o.src));
+    return ids.filter(Boolean);
+  }
+
   function serialize() {
-    const used = new Set([state.brand.logo, ...state.items.map(i => i.src)].filter(Boolean));
+    const used = new Set([state.brand.logo, ...state.items.flatMap(itemAssets)].filter(Boolean));
     const assets = {};
     used.forEach(id => { if (state.assets[id]) assets[id] = state.assets[id]; });
     return { app: 'brand-mockup-board', version: 1, title: state.title, canvasBg: state.canvasBg, brand: state.brand, items: state.items, assets };
@@ -290,6 +310,113 @@
     return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
   }
 
+  /* ---------- mockup elements ---------- */
+
+  const r1 = v => Math.round(v * 10) / 10;
+  const mockupInfo = it => M.elements(it, state.brand, assetURL(state.brand.logo));
+  const getElement = (it, elId) => (it && elId ? mockupInfo(it).list.find(e => e.id === elId) : null);
+
+  function toTpl(it, p) {
+    const s = M.templates[it.template].w / it.w;
+    return { x: (p.x - it.x) * s, y: (p.y - it.y) * s };
+  }
+  function tplToScreen(it, b) {
+    const k = it.w / M.templates[it.template].w;
+    const { x: vx, y: vy, zoom: z } = state.view;
+    return { x: (it.x + b.x * k) * z + vx, y: (it.y + b.y * k) * z + vy, w: b.w * k * z, h: b.h * k * z };
+  }
+  // Rendered bounds in template units; accurate for text, unlike the model box.
+  function elBBox(it, elId) {
+    const el = els.get(it.id);
+    const g = el && el.querySelector(`[data-el="${CSS.escape(elId)}"]`);
+    if (!g) return null;
+    try {
+      const b = g.getBBox();
+      return b.width || b.height ? { x: b.x, y: b.y, w: b.width, h: b.height } : null;
+    } catch { return null; }
+  }
+  function setEl(it, elId, patch) {
+    it.props = it.props || {};
+    const ov = it.props.ov = it.props.ov || {};
+    ov[elId] = { ...(ov[elId] || {}), ...patch };
+  }
+
+  function startMockupEdit(id, elId = null) {
+    const it = byId(id);
+    if (!it || it.type !== 'mockup') return;
+    if (editingId) endEdit();
+    if (mEdit) els.get(mEdit.id)?.classList.remove('editing-mockup');
+    const e = getElement(it, elId);
+    mEdit = { id, el: e ? e.id : null, hover: null };
+    selection = new Set([id]);
+    viewport.classList.add('mock-editing');
+    els.get(id).classList.add('editing-mockup');
+    if (it.w * state.view.zoom < 360) fitTo(withLabel(boxOf(it)), 3);
+    refreshSelection();
+  }
+  function clearMockupEdit() {
+    if (!mEdit) return;
+    els.get(mEdit.id)?.classList.remove('editing-mockup');
+    viewport.classList.remove('mock-editing');
+    mEdit = null;
+  }
+  function exitMockupEdit() {
+    clearMockupEdit();
+    refreshSelection();
+  }
+
+  function afterElChange(it) {
+    renderItem(it);
+    commit();
+    renderProps();
+    renderOverlay();
+  }
+  function addElement(kind, extra = {}) {
+    const it = byId(mEdit.id);
+    const t = M.templates[it.template];
+    const id = kind[0] + '_' + uid();
+    const cx = extra.at ? extra.at.x : t.w / 2, cy = extra.at ? extra.at.y : t.h / 2;
+    const s = Math.round(Math.min(t.w, t.h) / 4);
+    let e;
+    if (kind === 'text') {
+      e = { id, label: '텍스트', kind, x: r1(cx - t.w * 0.35), y: r1(cy), w: r1(t.w * 0.7), size: Math.round(t.h / 14), weight: 700, align: 'center', fill: 'fg', text: '텍스트를 입력하세요' };
+    } else if (kind === 'rect') {
+      e = { id, label: '사각형', kind, x: cx - s / 2, y: cy - s / 2, w: s, h: s, rx: 0, fill: 'accent' };
+    } else if (kind === 'ellipse') {
+      e = { id, label: '원', kind, x: cx - s / 2, y: cy - s / 2, w: s, h: s, fill: 'accent' };
+    } else if (kind === 'image') {
+      const k = Math.min(1, (t.w * 0.6) / extra.w, (t.h * 0.6) / extra.h);
+      const w = r1(extra.w * k), h = r1(extra.h * k);
+      e = { id, label: extra.name || '이미지', kind, x: r1(cx - w / 2), y: r1(cy - h / 2), w, h, src: extra.src, fitMode: 'meet' };
+    } else return;
+    it.props = it.props || {};
+    it.props.extra = [...(it.props.extra || []), e];
+    mEdit.el = id;
+    afterElChange(it);
+  }
+  async function addImageElements(files, at) {
+    for (const f of Array.from(files || []).filter(x => x.type.startsWith('image/'))) {
+      try {
+        const { src, w, h } = await importImage(f, 2000);
+        addElement('image', { src: addAsset(src), w, h, at, name: f.name.replace(/\.[^.]+$/, '') });
+      } catch {
+        toast(`${f.name} 파일을 불러오지 못했어요`);
+      }
+    }
+  }
+  function deleteElement(it, elId) {
+    const e = getElement(it, elId);
+    if (!e) return;
+    if (e.custom) {
+      it.props.extra = it.props.extra.filter(x => x.id !== elId);
+      if (it.props.ov) delete it.props.ov[elId];
+    } else {
+      setEl(it, elId, { hidden: true });
+    }
+    if (mEdit) mEdit.el = null;
+    afterElChange(it);
+  }
+
   /* ---------- rendering ---------- */
 
   function createEl(it) {
@@ -356,7 +483,7 @@
       const body = el.lastChild;
       if (el._key !== key) {
         el._key = key;
-        body.innerHTML = M.render(it, b, logo);
+        body.innerHTML = M.render(it, b, { logo, asset: assetURL });
         el.firstChild.textContent = tpl.name;
       }
       body.style.borderRadius = (tpl.r * it.w / tpl.w) + 'px';
@@ -386,31 +513,57 @@
   }
 
   function refreshSelection() {
+    // Leaving the mockup (other selection, undo, delete) ends its edit mode.
+    if (mEdit && (selection.size !== 1 || !selection.has(mEdit.id) || !byId(mEdit.id))) clearMockupEdit();
+    if (mEdit && mEdit.el && !getElement(byId(mEdit.id), mEdit.el)) mEdit.el = null;
     for (const [id, el] of els) el.classList.toggle('selected', selection.has(id));
     renderOverlay();
     renderProps();
     renderLayers();
   }
 
+  const ovRect = (s, cls) => `<div class="${cls}" style="left:${s.x}px;top:${s.y}px;width:${s.w}px;height:${s.h}px"></div>`;
+  const ovHandles = s => ['nw', 'ne', 'sw', 'se'].map(c => {
+    const hx = c[1] === 'w' ? s.x : s.x + s.w;
+    const hy = c[0] === 'n' ? s.y : s.y + s.h;
+    return `<div class="handle h-${c}" data-handle="${c}" style="left:${hx}px;top:${hy}px"></div>`;
+  }).join('');
+
   function renderOverlay() {
+    if (mEdit) { renderEditOverlay(); return; }
     const sel = selectedItems();
     if (!sel.length) { overlay.innerHTML = ''; return; }
     const { x: vx, y: vy, zoom: z } = state.view;
     const S = b => ({ x: b.x * z + vx, y: b.y * z + vy, w: b.w * z, h: b.h * z });
-    const rect = (s, cls) => `<div class="${cls}" style="left:${s.x}px;top:${s.y}px;width:${s.w}px;height:${s.h}px"></div>`;
     const boxes = sel.map(boxOf);
     const u = union(boxes), su = S(u);
-    let html = sel.length > 1 ? boxes.map(b => rect(S(b), 'sel-item')).join('') : '';
-    html += rect(su, 'sel-box');
+    let html = sel.length > 1 ? boxes.map(b => ovRect(S(b), 'sel-item')).join('') : '';
+    html += ovRect(su, 'sel-box');
     const moving = drag && drag.mode === 'move' && drag.moved;
-    if (sel.length === 1 && !editingId && !moving) {
-      for (const c of ['nw', 'ne', 'sw', 'se']) {
-        const hx = c[1] === 'w' ? su.x : su.x + su.w;
-        const hy = c[0] === 'n' ? su.y : su.y + su.h;
-        html += `<div class="handle h-${c}" data-handle="${c}" style="left:${hx}px;top:${hy}px"></div>`;
+    if (sel.length === 1 && !editingId && !moving) html += ovHandles(su);
+    html += `<div class="size-badge" style="left:${su.x + su.w / 2}px;top:${su.y + su.h + 8}px">${Math.round(u.w)} × ${Math.round(u.h)}</div>`;
+    overlay.innerHTML = html;
+  }
+
+  function renderEditOverlay() {
+    const it = byId(mEdit.id);
+    if (!it) { overlay.innerHTML = ''; return; }
+    const { x: vx, y: vy, zoom: z } = state.view;
+    let html = ovRect({ x: it.x * z + vx, y: it.y * z + vy, w: it.w * z, h: it.h * z }, 'edit-frame');
+    if (mEdit.hover && mEdit.hover !== mEdit.el) {
+      const b = elBBox(it, mEdit.hover);
+      if (b) html += ovRect(tplToScreen(it, b), 'el-hover');
+    }
+    if (mEdit.el) {
+      const b = elBBox(it, mEdit.el);
+      const e = getElement(it, mEdit.el);
+      if (b) {
+        const s = tplToScreen(it, b);
+        html += ovRect(s, 'sel-box');
+        const moving = drag && drag.mode === 'el-move' && drag.moved;
+        if (e && !e.locked && !moving) html += ovHandles(s);
       }
     }
-    html += `<div class="size-badge" style="left:${su.x + su.w / 2}px;top:${su.y + su.h + 8}px">${Math.round(u.w)} × ${Math.round(u.h)}</div>`;
     overlay.innerHTML = html;
   }
 
@@ -607,7 +760,7 @@
     const tpl = M.templates[it.template];
     const scale = 3;
     const size = { w: tpl.w * scale, h: tpl.h * scale };
-    const markup = M.render(it, state.brand, state.assets[state.brand.logo] || null, size);
+    const markup = M.render(it, state.brand, { logo: state.assets[state.brand.logo] || null, asset: id => state.assets[id], size });
     const url = URL.createObjectURL(new Blob([markup], { type: 'image/svg+xml;charset=utf-8' }));
     try {
       const img = await loadImage(url);
@@ -669,7 +822,7 @@
       <div class="menu-title">${g}</div>
       <div class="menu-grid">${Object.entries(M.templates).filter(([, t]) => t.group === g).map(([k, t]) => `
         <button class="mock-card" data-template="${k}">
-          <div class="mock-thumb">${M.render({ id: 'pv' + k, template: k, props: {} }, state.brand, logo)}</div>
+          <div class="mock-thumb">${M.render({ id: 'pv' + k, template: k, props: {} }, state.brand, { logo })}</div>
           <span>${t.name}</span>
         </button>`).join('')}
       </div>`).join('');
@@ -750,7 +903,7 @@
   function boardProps() {
     const keys = [
       ['이동 / 손 도구', 'V / H'], ['드래그로 화면 이동', 'Space'], ['노트 / 이미지 / 목업', 'N / I / M'],
-      ['노트 추가', '더블클릭'], ['확대 · 축소', '⌘ + 스크롤'], ['전체 보기 / 100%', '⇧1 / ⇧0'],
+      ['노트 추가 / 목업 편집', '더블클릭'], ['확대 · 축소', '⌘ + 스크롤'], ['전체 보기 / 100%', '⇧1 / ⇧0'],
       ['글자 크기', '⌘⇧ < >'], ['복제 / 삭제', '⌘D / ⌫'], ['실행 취소', '⌘Z'], ['맨 앞 / 맨 뒤', '] / ['],
     ];
     return sec('캔버스', `<div class="swatches">${CANVAS_BGS.map(([c, l]) => swatch('canvas-bg', c, c, l, state.canvasBg === c)).join('')}</div>`)
@@ -797,7 +950,9 @@
     const mode = p.logoMode || 'auto';
     const scale = Math.round((p.logoScale ?? 1) * 100);
     const options = M.groups.map(g => `<optgroup label="${g}">${Object.entries(M.templates).filter(([, t]) => t.group === g).map(([k, t]) => `<option value="${k}"${k === it.template ? ' selected' : ''}>${t.name}</option>`).join('')}</optgroup>`).join('');
-    return sec('목업', `<select class="field" data-field="template">${options}</select>`)
+    return sec('목업', `<select class="field" data-field="template">${options}</select>
+        <button class="btn btn-primary" data-action="edit-mockup" style="margin-top:8px">${ICON.edit}디자인 편집</button>
+        <p class="hint">더블클릭해도 편집할 수 있어요. 로고·글자·도형을 하나씩 옮기고 바꿀 수 있어요.</p>`)
       + sec('바탕 색', `<div class="swatches">${MOCKUP_BGS.map(([k, l]) => swatch('bg', k, M.colorOf(k, state.brand), l, bg === k)).join('')}
           <label class="swatch custom${!known ? ' active' : ''}" style="--c:${known ? '#fff' : bg}" title="직접 선택">${ICON.plus}<input type="color" data-field="bgCustom" value="${known ? M.colorOf(bg, state.brand) : bg}"></label></div>`)
       + sec('로고', `
@@ -810,7 +965,75 @@
     return sec('이미지', `<button class="btn" data-action="use-as-logo">${ICON.logo}브랜드 로고로 사용</button><button class="btn" data-action="natural">${ICON.ratio}원본 비율로 되돌리기</button>`);
   }
 
+  const EL_COLORS = [['primary', 'Primary'], ['secondary', 'Secondary'], ['fg', '자동 (배경 대비)'], ['#FFFFFF', '흰색'], ['#161616', '검정']];
+
+  function elementProps(it, e, c) {
+    let h = '';
+    const box = M.elBox(e);
+    const ro = e.kind === 'text' ? ' readonly' : '';
+    if (e.locked) {
+      h += sec(esc(e.label), '<p class="hint" style="margin:0">위치가 고정된 요소예요. 색과 투명도를 바꿀 수 있어요.</p>');
+    } else {
+      h += sec(esc(e.label), `<div class="grid2">${num('X', 'el-x', r1(box.x))}${num('Y', 'el-y', r1(box.y))}${num('W', 'el-w', r1(box.w))}<label class="num"><span>H</span><input type="number" data-field="el-h" value="${r1(box.h)}"${ro}></label></div>`);
+    }
+    if (e.kind === 'text') {
+      h += sec('텍스트', `
+        <input class="field" data-field="el-text" data-live value="${esc(e.text)}" placeholder="내용 입력">
+        <div class="row">
+          <select class="field" data-field="el-weight">
+            ${[[400, 'Regular'], [500, 'Medium'], [600, 'Semibold'], [700, 'Bold'], [800, 'Extrabold']].map(([w, l]) => `<option value="${w}"${(e.weight || 400) === w ? ' selected' : ''}>${l}</option>`).join('')}
+          </select>
+          <div class="fs-control" title="글자 크기">
+            ${btn('el-fs', -1, 'minus', '작게')}
+            <input type="number" data-field="el-size" data-live min="2" max="400" value="${r1(box.size)}">
+            ${btn('el-fs', 1, 'plus', '크게')}
+          </div>
+        </div>
+        <div class="seg">${['left', 'center', 'right'].map(a => `<button class="seg-btn${e.align === a ? ' active' : ''}" data-action="el-align" data-value="${a}" title="${{ left: '왼쪽', center: '가운데', right: '오른쪽' }[a]} 정렬">${ICON['t' + a]}</button>`).join('')}</div>
+        <label class="check"><input type="checkbox" data-field="el-fit"${e.fit ? ' checked' : ''}> 너비를 넘으면 자동으로 줄이기</label>`);
+    }
+    if (e.kind === 'logo') {
+      const mode = (it.props || {}).logoMode || 'auto';
+      h += sec('로고 색', `<div class="seg">${[['auto', '자동'], ['original', '원본'], ['white', '흰색'], ['black', '검정']].map(([k, l]) => `<button class="seg-btn${mode === k ? ' active' : ''}" data-action="logoMode" data-value="${k}">${l}</button>`).join('')}</div>`);
+    } else if (e.kind === 'image') {
+      h += sec('이미지', `<div class="seg">${[['meet', '전체 보이기'], ['cover', '꽉 채우기']].map(([k, l]) => `<button class="seg-btn${(e.fitMode || 'meet') === k ? ' active' : ''}" data-action="el-fitmode" data-value="${k}">${l}</button>`).join('')}</div>
+        <button class="btn" data-action="el-replace" style="margin-top:8px">${ICON.image}이미지 바꾸기</button>`);
+    } else {
+      const cur = M.paint(e.fill, c);
+      const known = EL_COLORS.some(([v]) => v === e.fill);
+      h += sec('색', `<div class="swatches">${EL_COLORS.map(([v, l]) => swatch('el-fill', v, M.paint(v, c), l, e.fill === v)).join('')}
+        <label class="swatch custom${!known ? ' active' : ''}" style="--c:${cur}" title="직접 선택">${ICON.plus}<input type="color" data-field="el-fill" value="${/^#[0-9a-f]{6}$/i.test(cur) ? cur : '#161616'}"></label></div>`);
+    }
+    const op = Math.round((e.opacity ?? 1) * 100);
+    h += sec('투명도', `<div class="range-row"><input type="range" class="range" data-field="el-opacity" min="0" max="100" value="${op}"><span class="value" data-op-value>${op}%</span></div>`);
+    h += sec('', `<div class="btn-row">
+        <button class="btn" data-action="el-reset">${ICON.reset}원래대로</button>
+        <button class="btn" data-action="el-delete">${ICON.trash}${e.custom ? '삭제' : '숨기기'}</button>
+      </div>`);
+    return h;
+  }
+
+  function mockupEditProps(it) {
+    const { c, tpl, list } = mockupInfo(it);
+    const e = mEdit.el ? list.find(x => x.id === mEdit.el) : null;
+    let h = `<div class="sel-head row-between"><span>목업 편집</span><button class="btn-chip" data-action="edit-done">완료</button></div>
+      <div class="sel-sub">${esc(tpl.name)} · 캔버스에서 요소를 클릭하세요</div>`;
+    if (e) h += elementProps(it, e, c);
+    h += sec('요소', `<ul class="el-list">${[...list].reverse().map(x => `
+        <li class="el-row${x.id === mEdit.el ? ' selected' : ''}${x.hidden ? ' is-hidden' : ''}" data-action="el-select" data-value="${esc(x.id)}">
+          ${ICON['k-' + x.kind] || ICON['k-shape']}<span>${esc(x.label)}</span>
+          <button class="icon-btn" data-action="el-toggle" data-value="${esc(x.id)}" title="${x.hidden ? '보이기' : '숨기기'}">${x.hidden ? ICON.eyeOff : ICON.eye}</button>
+        </li>`).join('')}</ul>
+      <div class="add-row">${[['text', '텍스트'], ['rect', '사각형'], ['ellipse', '원'], ['image', '이미지']].map(([k, l]) => `<button class="btn" data-action="el-add" data-value="${k}">${ICON['k-' + k]}${l}</button>`).join('')}</div>`);
+    h += sec('', `<button class="btn" data-action="el-reset-all">${ICON.reset}이 목업의 수정 모두 되돌리기</button>`);
+    return h;
+  }
+
   function renderProps() {
+    if (mEdit) {
+      const it = byId(mEdit.id);
+      if (it) { propsEl.innerHTML = mockupEditProps(it); return; }
+    }
     const sel = selectedItems();
     if (!sel.length) { propsEl.innerHTML = boardProps(); return; }
     const one = sel.length === 1 ? sel[0] : null;
@@ -846,7 +1069,66 @@
     if (v) v.textContent = n + 'px';
   }
 
+  function updateElValues(it, e) {
+    const b = M.elBox(e);
+    const vals = { 'el-x': r1(b.x), 'el-y': r1(b.y), 'el-w': r1(b.w), 'el-h': r1(b.h), 'el-size': b.size != null ? r1(b.size) : null };
+    for (const k in vals) {
+      const input = propsEl.querySelector(`input[data-field="${k}"]`);
+      if (input && vals[k] != null && document.activeElement !== input) input.value = vals[k];
+    }
+  }
+
+  function applyElField(f, raw, final) {
+    const it = mEdit && byId(mEdit.id);
+    const e = it && getElement(it, mEdit.el);
+    if (!e) return;
+    const box = M.elBox(e);
+    const v = +raw;
+    const keepRatio = e.kind === 'logo' || e.kind === 'image';
+    switch (f) {
+      case 'x':
+        if (!final || !isFinite(v)) return;
+        setEl(it, e.id, { x: v });
+        break;
+      case 'y':
+        if (!final || !isFinite(v)) return;
+        setEl(it, e.id, { y: e.kind === 'text' ? r1(v + (e.y - box.y)) : v });
+        break;
+      case 'w':
+        if (!final || !(v > 0)) return;
+        setEl(it, e.id, keepRatio ? { w: v, h: r1(v * e.h / e.w) } : { w: v });
+        break;
+      case 'h':
+        if (!final || !(v > 0) || e.kind === 'text') return;
+        setEl(it, e.id, keepRatio ? { h: v, w: r1(v * e.w / e.h) } : { h: v });
+        break;
+      case 'text': setEl(it, e.id, { text: raw }); break;
+      case 'size':
+        if (!(v > 0)) return;
+        setEl(it, e.id, { size: clamp(v, 2, 400), fit: false });
+        break;
+      case 'weight': setEl(it, e.id, { weight: v }); break;
+      case 'fit': setEl(it, e.id, { fit: !!raw }); break;
+      case 'fill': setEl(it, e.id, { fill: raw }); break;
+      case 'opacity': {
+        setEl(it, e.id, { opacity: clamp(v, 0, 100) / 100 });
+        const o = propsEl.querySelector('[data-op-value]');
+        if (o) o.textContent = Math.round(v) + '%';
+        break;
+      }
+      default: return;
+    }
+    renderItem(it);
+    renderOverlay();
+    updateElValues(it, getElement(it, e.id));
+    if (final) {
+      commit();
+      if (['fill', 'w', 'h', 'fit', 'weight', 'size'].includes(f)) renderProps();
+    }
+  }
+
   function applyField(field, raw, final) {
+    if (field.startsWith('el-')) { applyElField(field.slice(3), raw, final); return; }
     const sel = selectedItems();
     const one = sel[0];
     const notes = sel.filter(i => i.type === 'note');
@@ -906,11 +1188,51 @@
     }
   }
 
+  function doElAction(action, v) {
+    const it = byId(mEdit.id);
+    const e = getElement(it, mEdit.el);
+    switch (action) {
+      case 'edit-done': exitMockupEdit(); return;
+      case 'el-select': mEdit.el = v; renderProps(); renderOverlay(); return;
+      case 'el-toggle': {
+        const x = getElement(it, v);
+        if (x) setEl(it, v, { hidden: !x.hidden });
+        break;
+      }
+      case 'el-add':
+        if (v === 'image') $('#file-el-image').click();
+        else addElement(v);
+        return;
+      case 'el-reset-all':
+        it.props = { ...it.props, ov: {}, extra: [] };
+        mEdit.el = null;
+        break;
+      default: {
+        if (!e) return;
+        if (action === 'el-delete') { deleteElement(it, e.id); return; }
+        if (action === 'el-reset') {
+          if (it.props.ov) delete it.props.ov[e.id];
+        } else if (action === 'el-align') setEl(it, e.id, { align: v });
+        else if (action === 'el-fill') setEl(it, e.id, { fill: v });
+        else if (action === 'el-fitmode') setEl(it, e.id, { fitMode: v });
+        else if (action === 'el-replace') { $('#file-el-image').dataset.replace = e.id; $('#file-el-image').click(); return; }
+        else if (action === 'el-fs') {
+          const cur = M.elBox(e).size;
+          const next = +v > 0 ? (FONT_SIZES.find(s => s > cur) ?? cur + 40) : ([...FONT_SIZES].reverse().find(s => s < cur) ?? Math.max(2, cur - 2));
+          setEl(it, e.id, { size: next, fit: false });
+        } else return;
+      }
+    }
+    afterElChange(it);
+  }
+
   function doAction(action, v) {
+    if (mEdit && (action.startsWith('el-') || action === 'edit-done')) { doElAction(action, v); return; }
     const sel = selectedItems();
     const one = sel[0];
     const notes = sel.filter(i => i.type === 'note');
     switch (action) {
+      case 'edit-mockup': startMockupEdit(one.id); return;
       case 'fill': notes.forEach(n => { n.fill = v; }); break;
       case 'color': notes.forEach(n => { n.color = v; }); break;
       case 'align': notes.forEach(n => { n.align = v; }); break;
@@ -945,7 +1267,7 @@
   });
   propsEl.addEventListener('change', e => {
     const f = e.target.dataset.field;
-    if (f) applyField(f, e.target.value, true);
+    if (f) applyField(f, e.target.type === 'checkbox' ? e.target.checked : e.target.value, true);
   });
   propsEl.addEventListener('keydown', e => {
     if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur();
@@ -977,6 +1299,30 @@
 
     const p = toWorld(e.clientX, e.clientY);
     const handle = e.target.closest('[data-handle]');
+
+    if (mEdit) {
+      const it = byId(mEdit.id);
+      if (handle && mEdit.el) {
+        const el = getElement(it, mEdit.el);
+        drag = { mode: 'el-resize', corner: handle.dataset.handle, start: toTpl(it, p), box: M.elBox(el), el, id: it.id };
+        viewport.setPointerCapture(e.pointerId);
+        return;
+      }
+      if (itemEl && itemEl.dataset.id === mEdit.id) {
+        const g = e.target.closest('[data-el]');
+        const el = g && getElement(it, g.dataset.el);
+        mEdit.el = el ? el.id : null;
+        if (el && !el.locked) {
+          drag = { mode: 'el-move', start: toTpl(it, p), orig: { x: el.x, y: el.y }, id: it.id, elId: el.id, moved: false };
+          viewport.setPointerCapture(e.pointerId);
+        }
+        renderProps();
+        renderOverlay();
+        return;
+      }
+      clearMockupEdit();
+    }
+
     if (handle) {
       const it = selectedItems()[0];
       if (!it) return;
@@ -1015,7 +1361,16 @@
   });
 
   viewport.addEventListener('pointermove', e => {
-    if (!drag) return;
+    if (!drag) {
+      if (mEdit) {
+        const inside = e.target.closest('.item')?.dataset.id === mEdit.id;
+        const g = inside ? e.target.closest('[data-el]') : null;
+        const h = g ? g.dataset.el : null;
+        if (h !== mEdit.hover) { mEdit.hover = h; renderOverlay(); }
+      }
+      return;
+    }
+    if (drag.mode === 'el-move' || drag.mode === 'el-resize') { dragElement(e); return; }
     if (drag.mode === 'pan') {
       state.view.x += e.clientX - drag.lx;
       state.view.y += e.clientY - drag.ly;
@@ -1075,11 +1430,49 @@
     }
   });
 
+  function dragElement(e) {
+    const it = byId(drag.id);
+    const q = toTpl(it, toWorld(e.clientX, e.clientY));
+    const dx = q.x - drag.start.x, dy = q.y - drag.start.y;
+    if (drag.mode === 'el-move') {
+      const px = it.w / M.templates[it.template].w * state.view.zoom;
+      if (!drag.moved && Math.hypot(dx, dy) * px < 2) return;
+      drag.moved = true;
+      setEl(it, drag.elId, { x: r1(drag.orig.x + dx), y: r1(drag.orig.y + dy) });
+    } else {
+      const b = drag.box, c = drag.corner, el = drag.el;
+      const keep = el.kind === 'logo' || el.kind === 'text' || el.kind === 'image' || e.shiftKey;
+      let w = b.w + (c[1] === 'w' ? -dx : dx);
+      let h = b.h + (c[0] === 'n' ? -dy : dy);
+      if (keep) { const s = Math.max(w / b.w, h / b.h); w = b.w * s; h = b.h * s; }
+      w = Math.max(2, w);
+      h = Math.max(2, h);
+      if (keep) { const r = b.w / b.h; if (w / h > r) h = w / r; else w = h * r; }
+      const x = c[1] === 'w' ? b.x + b.w - w : b.x;
+      const y = c[0] === 'n' ? b.y + b.h - h : b.y;
+      if (el.kind === 'text') {
+        const s = w / b.w;
+        setEl(it, el.id, { x: r1(x), w: r1(w), size: r1(el.size * s), y: r1(y + (el.y - b.y) * s) });
+      } else {
+        setEl(it, el.id, { x: r1(x), y: r1(y), w: r1(w), h: r1(h) });
+      }
+    }
+    renderItem(it);
+    renderOverlay();
+    updateElValues(it, getElement(it, mEdit.el));
+  }
+
   function endDrag() {
     if (!drag) return;
     const d = drag;
     drag = null;
     viewport.classList.remove('dragging', 'panning');
+    if (d.mode === 'el-move' || d.mode === 'el-resize') {
+      if (d.mode === 'el-resize' || d.moved) commit();
+      renderProps();
+      renderOverlay();
+      return;
+    }
     if (d.mode === 'move') {
       if (d.moved) commit();
       else if (d.clickId) selection = new Set([d.clickId]);
@@ -1101,6 +1494,16 @@
     if (itemEl) {
       const it = byId(itemEl.dataset.id);
       if (it && it.type === 'note') startEdit(it.id);
+      if (it && it.type === 'mockup') {
+        const g = e.target.closest('[data-el]');
+        if (!mEdit || mEdit.id !== it.id) {
+          const el = g && getElement(it, g.dataset.el);
+          startMockupEdit(it.id, el && !el.locked ? el.id : null);
+        } else if (getElement(it, mEdit.el)?.kind === 'text') {
+          const input = propsEl.querySelector('[data-field="el-text"]');
+          if (input) { input.focus(); input.select(); }
+        }
+      }
       return;
     }
     const p = toWorld(e.clientX, e.clientY);
@@ -1143,7 +1546,13 @@
   viewport.addEventListener('drop', e => {
     e.preventDefault();
     viewport.classList.remove('drop-over');
-    addImages(e.dataTransfer.files, toWorld(e.clientX, e.clientY));
+    const p = toWorld(e.clientX, e.clientY);
+    const target = e.target.closest('.item');
+    if (mEdit && target && target.dataset.id === mEdit.id) {
+      addImageElements(e.dataTransfer.files, toTpl(byId(mEdit.id), p));
+      return;
+    }
+    addImages(e.dataTransfer.files, p);
   });
 
   function copySelection(e) {
@@ -1151,7 +1560,7 @@
     e.preventDefault();
     const sel = selectedItems();
     const assets = {};
-    sel.forEach(it => { if (it.src) assets[it.src] = state.assets[it.src]; });
+    sel.flatMap(itemAssets).forEach(id => { assets[id] = state.assets[id]; });
     e.clipboardData.setData('text/plain', CLIP + JSON.stringify({ items: sel, assets }));
     return true;
   }
@@ -1211,6 +1620,40 @@
     if (e.shiftKey && e.code === 'Digit0') { zoomCenter(1 / state.view.zoom); return; }
     if (mod) return;
 
+    if (mEdit) {
+      const it = byId(mEdit.id);
+      const el = getElement(it, mEdit.el);
+      if (e.key === 'Escape') {
+        if (mEdit.el) { mEdit.el = null; renderProps(); renderOverlay(); } else exitMockupEdit();
+        return;
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        if (el) deleteElement(it, el.id);
+        return;
+      }
+      if (e.key === 'Enter' && el && el.kind === 'text') {
+        e.preventDefault();
+        const input = propsEl.querySelector('[data-field="el-text"]');
+        if (input) { input.focus(); input.select(); }
+        return;
+      }
+      if (e.key.startsWith('Arrow')) {
+        if (!el || el.locked) return;
+        e.preventDefault();
+        const s = e.shiftKey ? 10 : 1;
+        setEl(it, el.id, {
+          x: r1(el.x + (e.key === 'ArrowLeft' ? -s : e.key === 'ArrowRight' ? s : 0)),
+          y: r1(el.y + (e.key === 'ArrowUp' ? -s : e.key === 'ArrowDown' ? s : 0)),
+        });
+        renderItem(it);
+        renderOverlay();
+        updateElValues(it, getElement(it, el.id));
+        commit();
+        return;
+      }
+    }
+
     switch (e.key) {
       case 'Delete': case 'Backspace': e.preventDefault(); deleteSelected(); return;
       case 'Escape':
@@ -1261,6 +1704,24 @@
 
   $('#file-image').addEventListener('change', e => { addImages(e.target.files, viewCenterWorld()); e.target.value = ''; });
   $('#file-logo').addEventListener('change', e => { setLogoFromFile(e.target.files[0]); e.target.value = ''; });
+  $('#file-el-image').addEventListener('change', async e => {
+    const input = e.target;
+    const files = Array.from(input.files);
+    const replaceId = input.dataset.replace;
+    delete input.dataset.replace;
+    input.value = '';
+    if (!mEdit || !files.length) return;
+    if (!replaceId) { addImageElements(files); return; }
+    try {
+      const it = byId(mEdit.id);
+      const el = getElement(it, replaceId);
+      const { src, w, h } = await importImage(files[0], 2000);
+      setEl(it, replaceId, { src: addAsset(src), h: r1(el.w * h / w) });
+      afterElChange(it);
+    } catch {
+      toast('이미지를 불러오지 못했어요');
+    }
+  });
   $('#file-board').addEventListener('change', async e => {
     const f = e.target.files[0];
     e.target.value = '';
