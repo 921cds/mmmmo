@@ -369,7 +369,9 @@
         const size = e.fit ? fit(e.text, e.w, e.size) : e.size;
         const tx = e.align === 'center' ? e.x + e.w / 2 : e.align === 'right' ? e.x + e.w : e.x;
         const anchor = { center: 'middle', right: 'end' }[e.align] || 'start';
-        return `<text x="${n(tx)}" y="${n(e.y)}" font-size="${n(size)}" font-weight="${e.weight || 400}"${e.ls ? ` letter-spacing="${e.ls}"` : ''} text-anchor="${anchor}" fill="${fill}"${e.font ? ` font-family="${esc(e.font)}"` : ''}>${esc(e.text)}</text>`;
+        // ff is a per-element font picked in the editor; font is a template's own default.
+        const family = e.ff ? fontStack(e.ff) : e.font;
+        return `<text x="${n(tx)}" y="${n(e.y)}" font-size="${n(size)}" font-weight="${e.weight || 400}"${e.ls ? ` letter-spacing="${e.ls}"` : ''} text-anchor="${anchor}" fill="${fill}"${family ? ` font-family="${esc(family)}"` : ''}>${esc(e.text)}</text>`;
       }
       case 'logo':
         return logo(c, e.x, e.y, e.w, e.h, e.align);

@@ -14,7 +14,12 @@
   const VIEW_KEY = KEY + ':view';
   const CLIP = 'brand-mockup-board/items:';
 
-  const FONTS = ['Pretendard', 'Inter', 'Noto Sans KR', 'Noto Serif KR', 'Space Grotesk', 'Montserrat', 'DM Serif Display'];
+  const FONT_GROUPS = [
+    ['한글', ['Pretendard', 'Noto Sans KR', 'IBM Plex Sans KR', 'Gowun Dodum', 'Noto Serif KR', 'Nanum Myeongjo', 'Black Han Sans']],
+    ['영문', ['Inter', 'Space Grotesk', 'Montserrat', 'DM Serif Display', 'Playfair Display']],
+  ];
+  const FONTS = FONT_GROUPS.flatMap(([, list]) => list);
+  const fontOptions = selected => FONT_GROUPS.map(([g, list]) => `<optgroup label="${g}">${list.map(f => `<option value="${f}" style="font-family:'${f}'"${f === selected ? ' selected' : ''}>${f}</option>`).join('')}</optgroup>`).join('');
   const FONT_SIZES = [10, 12, 14, 16, 20, 24, 32, 40, 48, 64, 80, 96, 128, 160, 200];
   const NOTE_FILLS = [['#FFF1B8', '노랑'], ['#FFFFFF', '흰색'], ['#E5EEFF', '파랑'], ['#E3F4E8', '초록'], ['#FDE7EC', '분홍'], ['#EFEFEF', '회색'], ['transparent', '채우기 없음']];
   const CANVAS_BGS = [['#F5F5F5', '라이트'], ['#FFFFFF', '화이트'], ['#E6E6E6', '그레이'], ['#1E1E1E', '다크']];
@@ -534,7 +539,8 @@
       s.fontSize = it.fontSize + 'px';
       s.fontWeight = it.weight;
       s.textAlign = it.align;
-      s.fontFamily = it.font === 'brand' ? M.fontStack(state.brand.font) : '';
+      s.fontFamily = it.font === 'brand' ? M.fontStack(state.brand.font)
+        : it.font && it.font !== 'ui' ? M.fontStack(it.font) : '';
       s.padding = none ? '4px' : Math.round(clamp(it.fontSize * 0.75, 12, 40)) + 'px';
       const t = el.firstChild;
       if (editingId !== it.id && t.textContent !== it.text) t.textContent = it.text;
@@ -1032,8 +1038,9 @@
     return sec('텍스트', `
       <div class="row">
         <select class="field" data-field="font">
-          <option value="ui"${n.font !== 'brand' ? ' selected' : ''}>기본 서체</option>
+          <option value="ui"${!n.font || n.font === 'ui' ? ' selected' : ''}>기본 서체</option>
           <option value="brand"${n.font === 'brand' ? ' selected' : ''}>브랜드 서체 · ${esc(b.font)}</option>
+          ${fontOptions(same('font') ? n.font : null)}
         </select>
       </div>
       <div class="row">
@@ -1096,6 +1103,12 @@
     if (e.kind === 'text') {
       h += sec('텍스트', `
         <input class="field" data-field="el-text" data-live value="${esc(e.text)}" placeholder="내용 입력">
+        <div class="row">
+          <select class="field" data-field="el-ff" title="서체">
+            <option value=""${!e.ff ? ' selected' : ''}>${e.font ? '템플릿 기본 서체' : `브랜드 서체 · ${esc(state.brand.font)}`}</option>
+            ${fontOptions(e.ff)}
+          </select>
+        </div>
         <div class="row">
           <select class="field" data-field="el-weight">
             ${[[400, 'Regular'], [500, 'Medium'], [600, 'Semibold'], [700, 'Bold'], [800, 'Extrabold']].map(([w, l]) => `<option value="${w}"${(e.weight || 400) === w ? ' selected' : ''}>${l}</option>`).join('')}
@@ -1263,6 +1276,7 @@
         setEl(it, e.id, { size: clamp(v, 2, 400), fit: false });
         break;
       case 'weight': setEl(it, e.id, { weight: v }); break;
+      case 'ff': setEl(it, e.id, { ff: raw || null }); break;
       case 'fit': setEl(it, e.id, { fit: !!raw }); break;
       case 'fill': setEl(it, e.id, { fill: raw }); break;
       case 'opacity': {
@@ -2073,7 +2087,7 @@
     hex.addEventListener('keydown', e => { if (e.key === 'Enter') hex.blur(); });
   }
   const fontSel = $('#brand-font');
-  fontSel.innerHTML = FONTS.map(f => `<option value="${f}">${f}</option>`).join('');
+  fontSel.innerHTML = fontOptions(null);
   fontSel.addEventListener('change', () => { updateBrand({ font: fontSel.value }); commit(); });
 
   const drop = $('#logo-drop');
