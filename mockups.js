@@ -273,8 +273,26 @@
     const ov = p.ov || {};
     const extra = p.extra || [];
     const customIds = new Set(extra.map(e => e.id));
-    const list = tpl.els(c).concat(extra).map(e => ({ ...e, ...(ov[e.id] || {}), custom: customIds.has(e.id) }));
+    let list = tpl.els(c).concat(extra).map(e => ({ ...e, ...(ov[e.id] || {}), custom: customIds.has(e.id) }));
+    // Custom stacking order; elements the order doesn't know keep their default place.
+    if (p.order) {
+      const idx = new Map(p.order.map((id, i) => [id, i]));
+      list = list.map((e, i) => ({ e, k: idx.has(e.id) ? idx.get(e.id) : i + 0.5 }))
+        .sort((a, b) => a.k - b.k).map(o => o.e);
+    }
     return { c, tpl, list };
+  }
+
+  // Where the picture sits inside its frame: cover or contain, then crop zoom and offset.
+  function imageContent(e) {
+    const ar = e.ar || e.w / e.h;
+    const cover = e.fitMode === 'cover';
+    let cw, ch;
+    if ((ar > e.w / e.h) === cover) { ch = e.h; cw = e.h * ar; } else { cw = e.w; ch = e.w / ar; }
+    const z = e.cz || 1;
+    cw *= z;
+    ch *= z;
+    return { x: e.x + (e.w - cw) / 2 + (e.cx || 0), y: e.y + (e.h - ch) / 2 + (e.cy || 0), w: cw, h: ch };
   }
 
   // Model box in template units. Text y is its baseline, so its box sits above it.
@@ -308,6 +326,19 @@
     return `<rect x="${n(X)}" y="${n(Y)}" width="${n(W)}" height="${n(H)}" fill="transparent"/><text x="${n(tx)}" y="${n(Y + H / 2)}" font-size="${size}" font-weight="800" letter-spacing="${n(-size * 0.03)}" text-anchor="${align === 'left' ? 'start' : 'middle'}" dominant-baseline="central" fill="${color}">${c.name}</text>`;
   }
 
+  // Clipping mask for a picture: its own frame (rect, rounded, circle) or another element's shape.
+  function maskShape(e, c, opts) {
+    if (e.mask === 'element' && e.maskEl) {
+      const m = opts.byId && opts.byId.get(e.maskEl);
+      if (m && m.kind !== 'image') return draw(m, c, opts);
+    }
+    if (e.mask === 'circle') {
+      return `<ellipse cx="${n(e.x + e.w / 2)}" cy="${n(e.y + e.h / 2)}" rx="${n(e.w / 2)}" ry="${n(e.h / 2)}" fill="#000"/>`;
+    }
+    const rx = e.mask === 'round' ? Math.min(e.w, e.h) * (e.radius ?? 0.15) : 0;
+    return `<rect x="${n(e.x)}" y="${n(e.y)}" width="${n(e.w)}" height="${n(e.h)}" rx="${n(rx)}" fill="#000"/>`;
+  }
+
   function draw(e, c, opts) {
     const fill = paint(e.fill, c);
     switch (e.kind) {
@@ -327,8 +358,14 @@
         return logo(c, e.x, e.y, e.w, e.h, e.align);
       case 'image': {
         const href = opts.asset && opts.asset(e.src);
-        if (!href) return `<rect x="${n(e.x)}" y="${n(e.y)}" width="${n(e.w)}" height="${n(e.h)}" fill="#D9D9D9"/>`;
-        return `<image href="${esc(href)}" x="${n(e.x)}" y="${n(e.y)}" width="${n(e.w)}" height="${n(e.h)}" preserveAspectRatio="xMidYMid ${e.fitMode === 'cover' ? 'slice' : 'meet'}"/>`;
+        const ct = imageContent(e);
+        const pic = (extra = '') => (href
+          ? `<image href="${esc(href)}" x="${n(ct.x)}" y="${n(ct.y)}" width="${n(ct.w)}" height="${n(ct.h)}" preserveAspectRatio="none"${extra}/>`
+          : `<rect x="${n(ct.x)}" y="${n(ct.y)}" width="${n(ct.w)}" height="${n(ct.h)}" fill="#D9D9D9"${extra}/>`);
+        const mid = `mk-${c.id}-${String(e.id).replace(/[^a-z0-9_-]/gi, '')}`;
+        // While cropping, the whole picture shows faintly so you can see what is cut off.
+        const ghost = opts.crop === e.id ? pic(' opacity="0.3"') : '';
+        return `${ghost}<mask id="${mid}" maskUnits="userSpaceOnUse" x="-5000" y="-5000" width="10000" height="10000" style="mask-type:alpha">${maskShape(e, c, opts)}</mask><g mask="url(#${mid})">${pic()}</g>`;
       }
       case 'shape': {
         const m = e.markup(fill);
@@ -343,10 +380,11 @@
   // opts: { logo: href, asset: id => href, size: {w, h} }
   function render(item, brand, opts = {}) {
     const { c, tpl, list } = elements(item, brand, opts.logo || null);
+    const o = { ...opts, byId: new Map(list.map(e => [e.id, e])) };
     const wh = opts.size ? `width="${opts.size.w}" height="${opts.size.h}"` : 'width="100%" height="100%"';
     const body = list.filter(e => !e.hidden).map(e => {
       const op = e.opacity != null && e.opacity !== 1 ? ` opacity="${e.opacity}"` : '';
-      return `<g data-el="${esc(e.id)}"${op}>${draw(e, c, opts)}</g>`;
+      return `<g data-el="${esc(e.id)}"${op}>${draw(e, c, o)}</g>`;
     }).join('');
     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${tpl.w} ${tpl.h}" ${wh} font-family="${esc(fontStack(brand.font))}">
       <defs>
@@ -358,5 +396,5 @@
     </svg>`;
   }
 
-  window.Mockups = { templates, groups, render, elements, elBox, paint, colorOf, isDark, onColor, slug, fontStack, SWATCH };
+  window.Mockups = { templates, groups, render, elements, elBox, imageContent, paint, colorOf, isDark, onColor, slug, fontStack, SWATCH };
 })();

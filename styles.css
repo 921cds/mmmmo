@@ -143,6 +143,8 @@ body.dark-canvas .item-label { color: #9A9A9A; }
 #viewport.mock-editing .item:not(.editing-mockup):hover { outline: none; }
 #viewport.mock-editing .item.editing-mockup { outline: none; }
 .editing-mockup [data-el] { cursor: move; }
+#viewport.cropping .editing-mockup, #viewport.cropping .editing-mockup [data-el] { cursor: grab; }
+.crop-box { position: absolute; border: 1px dashed var(--accent); opacity: .7; }
 .editing-mockup .item-label { color: var(--accent); }
 
 #marquee {

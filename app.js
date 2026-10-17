@@ -53,6 +53,8 @@
     eyeOff: svg('<path d="M2.5 10s2.8-5 7.5-5 7.5 5 7.5 5-2.8 5-7.5 5-7.5-5-7.5-5z"/><path d="M4 16 16 4"/>'),
     reset: svg('<path d="M4.6 8A6 6 0 1 1 4 11"/><path d="M4 4v4h4"/>'),
     edit: svg('<path d="M12.5 4.5l3 3L8 15H5v-3z"/><path d="M11 6l3 3"/>'),
+    up: svg('<path d="M10 15.5v-11M6 8.5l4-4 4 4"/>'),
+    down: svg('<path d="M10 4.5v11M6 11.5l4 4 4-4"/>'),
     'k-text': svg('<path d="M5 5h10M10 5v10"/>'),
     'k-rect': svg('<rect x="4" y="4" width="12" height="12" rx="1"/>'),
     'k-ellipse': svg('<circle cx="10" cy="10" r="6"/>'),
@@ -335,10 +337,71 @@
       return b.width || b.height ? { x: b.x, y: b.y, w: b.width, h: b.height } : null;
     } catch { return null; }
   }
+  // Pictures report their uncropped size to getBBox, so use the frame instead.
+  function elBounds(it, elId) {
+    const e = getElement(it, elId);
+    if (e && e.kind === 'image') return M.elBox(e);
+    return elBBox(it, elId);
+  }
   function setEl(it, elId, patch) {
     it.props = it.props || {};
     const ov = it.props.ov = it.props.ov || {};
     ov[elId] = { ...(ov[elId] || {}), ...patch };
+  }
+
+  // Keep the cropped picture from sliding past its frame.
+  function clampCrop(e, patch) {
+    const t = { ...e, ...patch };
+    const ct = M.imageContent({ ...t, cx: 0, cy: 0 });
+    const mx = Math.abs(ct.w - t.w) / 2, my = Math.abs(ct.h - t.h) / 2;
+    return { ...patch, cx: r1(clamp(t.cx || 0, -mx, mx)), cy: r1(clamp(t.cy || 0, -my, my)) };
+  }
+  const maskCandidates = (it, e) => mockupInfo(it).list.filter(x => x.kind !== 'image' && x.id !== e.id && x.id !== 'bg');
+
+  function setMask(it, e, kind, maskElId) {
+    if (kind === 'element') {
+      const cands = maskCandidates(it, e);
+      const keep = e.maskEl && cands.some(x => x.id === e.maskEl) ? e.maskEl : null;
+      const pick = cands.find(x => x.kind === 'ellipse' || x.kind === 'shape') || cands[0];
+      const id = maskElId || keep || (pick && pick.id);
+      if (!id) { toast('마스크로 쓸 도형이 없어요. 먼저 사각형이나 원을 추가하세요'); return false; }
+      if (e.maskHid && e.maskHid !== id) setEl(it, e.maskHid, { hidden: false });
+      // Like a design tool, the shape used as a mask stops drawing on its own.
+      setEl(it, id, { hidden: true });
+      setEl(it, e.id, { mask: 'element', maskEl: id, maskHid: id });
+    } else {
+      if (e.maskHid) setEl(it, e.maskHid, { hidden: false });
+      setEl(it, e.id, { mask: kind, maskEl: null, maskHid: null });
+    }
+    return true;
+  }
+
+  function reorderElement(it, elId, dir) {
+    const list = mockupInfo(it).list;
+    const t = M.templates[it.template];
+    // Never slide below a locked background that fills most of the mockup.
+    let floor = 0;
+    list.forEach((x, i) => { if (x.locked && x.w * x.h >= t.w * t.h * 0.5) floor = i + 1; });
+    const ids = list.map(x => x.id);
+    const i = ids.indexOf(elId);
+    if (i < 0) return;
+    ids.splice(i, 1);
+    const j = dir === 'front' ? ids.length
+      : dir === 'back' ? floor
+        : dir === 'forward' ? Math.min(ids.length, i + 1)
+          : Math.max(floor, i - 1);
+    ids.splice(j, 0, elId);
+    it.props.order = ids;
+  }
+
+  function setCrop(id) {
+    if (!mEdit) return;
+    mEdit.crop = id;
+    viewport.classList.toggle('cropping', !!id);
+    const it = byId(mEdit.id);
+    renderItem(it);
+    renderProps();
+    renderOverlay();
   }
 
   function startMockupEdit(id, elId = null) {
@@ -356,9 +419,12 @@
   }
   function clearMockupEdit() {
     if (!mEdit) return;
+    const it = byId(mEdit.id);
+    const wasCropping = !!mEdit.crop;
     els.get(mEdit.id)?.classList.remove('editing-mockup');
-    viewport.classList.remove('mock-editing');
+    viewport.classList.remove('mock-editing', 'cropping');
     mEdit = null;
+    if (wasCropping && it) renderItem(it);
   }
   function exitMockupEdit() {
     clearMockupEdit();
@@ -387,7 +453,7 @@
     } else if (kind === 'image') {
       const k = Math.min(1, (t.w * 0.6) / extra.w, (t.h * 0.6) / extra.h);
       const w = r1(extra.w * k), h = r1(extra.h * k);
-      e = { id, label: extra.name || '이미지', kind, x: r1(cx - w / 2), y: r1(cy - h / 2), w, h, src: extra.src, fitMode: 'meet' };
+      e = { id, label: extra.name || '이미지', kind, x: r1(cx - w / 2), y: r1(cy - h / 2), w, h, src: extra.src, ar: extra.w / extra.h, fitMode: 'cover', mask: 'rect' };
     } else return;
     it.props = it.props || {};
     it.props.extra = [...(it.props.extra || []), e];
@@ -479,11 +545,12 @@
       const tpl = M.templates[it.template] || M.templates['card-front'];
       const logo = assetURL(state.brand.logo);
       const b = state.brand;
-      const key = JSON.stringify([it.template, it.props, b.name, b.tagline, b.primary, b.secondary, b.font, logo]);
+      const crop = mEdit && mEdit.id === it.id ? mEdit.crop || null : null;
+      const key = JSON.stringify([it.template, it.props, b.name, b.tagline, b.primary, b.secondary, b.font, logo, crop]);
       const body = el.lastChild;
       if (el._key !== key) {
         el._key = key;
-        body.innerHTML = M.render(it, b, { logo, asset: assetURL });
+        body.innerHTML = M.render(it, b, { logo, asset: assetURL, crop });
         el.firstChild.textContent = tpl.name;
       }
       body.style.borderRadius = (tpl.r * it.w / tpl.w) + 'px';
@@ -550,12 +617,23 @@
     if (!it) { overlay.innerHTML = ''; return; }
     const { x: vx, y: vy, zoom: z } = state.view;
     let html = ovRect({ x: it.x * z + vx, y: it.y * z + vy, w: it.w * z, h: it.h * z }, 'edit-frame');
+    if (mEdit.crop) {
+      const e = getElement(it, mEdit.crop);
+      if (e) {
+        html += ovRect(tplToScreen(it, M.elBox(e)), 'sel-box');
+        html += ovRect(tplToScreen(it, M.imageContent(e)), 'crop-box');
+        overlay.innerHTML = html;
+        return;
+      }
+      mEdit.crop = null;
+      viewport.classList.remove('cropping');
+    }
     if (mEdit.hover && mEdit.hover !== mEdit.el) {
-      const b = elBBox(it, mEdit.hover);
+      const b = elBounds(it, mEdit.hover);
       if (b) html += ovRect(tplToScreen(it, b), 'el-hover');
     }
     if (mEdit.el) {
-      const b = elBBox(it, mEdit.el);
+      const b = elBounds(it, mEdit.el);
       const e = getElement(it, mEdit.el);
       if (b) {
         const s = tplToScreen(it, b);
@@ -996,13 +1074,35 @@
       const mode = (it.props || {}).logoMode || 'auto';
       h += sec('로고 색', `<div class="seg">${[['auto', '자동'], ['original', '원본'], ['white', '흰색'], ['black', '검정']].map(([k, l]) => `<button class="seg-btn${mode === k ? ' active' : ''}" data-action="logoMode" data-value="${k}">${l}</button>`).join('')}</div>`);
     } else if (e.kind === 'image') {
-      h += sec('이미지', `<div class="seg">${[['meet', '전체 보이기'], ['cover', '꽉 채우기']].map(([k, l]) => `<button class="seg-btn${(e.fitMode || 'meet') === k ? ' active' : ''}" data-action="el-fitmode" data-value="${k}">${l}</button>`).join('')}</div>
+      const mask = e.mask || 'rect';
+      const cands = maskCandidates(it, e);
+      const radius = Math.round((e.radius ?? 0.15) * 100);
+      const zoom = Math.round((e.cz || 1) * 100);
+      const cropping = mEdit.crop === e.id;
+      h += sec('클리핑 마스크', `
+        <div class="seg">${[['rect', '사각형'], ['round', '둥근'], ['circle', '원'], ['element', '요소']].map(([k, l]) => `<button class="seg-btn${mask === k ? ' active' : ''}" data-action="el-mask" data-value="${k}">${l}</button>`).join('')}</div>
+        ${mask === 'round' ? `<div class="range-row" style="margin-top:10px"><span class="label">모서리</span><input type="range" class="range" data-field="el-radius" min="0" max="50" value="${radius}"><span class="value" data-radius-value>${radius}%</span></div>` : ''}
+        ${mask === 'element' ? `<select class="field" data-field="el-maskel" style="margin-top:8px">${cands.map(x => `<option value="${esc(x.id)}"${x.id === e.maskEl ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}</select>
+          <p class="hint">고른 요소의 모양대로 사진이 잘려요. 마스크로 쓴 요소는 숨겨지고, 요소 목록에서 다시 보이게 할 수 있어요.</p>` : ''}`);
+      h += sec('크롭', `
+        <div class="seg">${[['cover', '꽉 채우기'], ['meet', '전체 보이기']].map(([k, l]) => `<button class="seg-btn${(e.fitMode || 'meet') === k ? ' active' : ''}" data-action="el-fitmode" data-value="${k}">${l}</button>`).join('')}</div>
+        <div class="range-row" style="margin-top:10px"><span class="label">확대</span><input type="range" class="range" data-field="el-zoom" min="100" max="400" value="${zoom}"><span class="value" data-zoom-value>${zoom}%</span></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn${cropping ? ' btn-primary' : ''}" data-action="el-crop">${ICON.move}${cropping ? '조정 완료' : '위치 조정'}</button>
+          <button class="btn" data-action="el-crop-reset">${ICON.reset}초기화</button>
+        </div>
+        <p class="hint">${cropping ? '목업 안에서 드래그하면 보이는 부분이 바뀌어요. Enter나 Esc로 마쳐요.' : '사진을 더블클릭해도 위치를 조정할 수 있어요.'}</p>
         <button class="btn" data-action="el-replace" style="margin-top:8px">${ICON.image}이미지 바꾸기</button>`);
     } else {
       const cur = M.paint(e.fill, c);
       const known = EL_COLORS.some(([v]) => v === e.fill);
       h += sec('색', `<div class="swatches">${EL_COLORS.map(([v, l]) => swatch('el-fill', v, M.paint(v, c), l, e.fill === v)).join('')}
         <label class="swatch custom${!known ? ' active' : ''}" style="--c:${cur}" title="직접 선택">${ICON.plus}<input type="color" data-field="el-fill" value="${/^#[0-9a-f]{6}$/i.test(cur) ? cur : '#161616'}"></label></div>`);
+    }
+    if (!e.locked) {
+      h += sec('순서', `<div class="btn-row">
+          ${btn('el-order', 'front', 'front', '맨 앞으로')}${btn('el-order', 'forward', 'up', '앞으로  ]')}${btn('el-order', 'backward', 'down', '뒤로  [')}${btn('el-order', 'back', 'back', '맨 뒤로')}
+        </div>`);
     }
     const op = Math.round((e.opacity ?? 1) * 100);
     h += sec('투명도', `<div class="range-row"><input type="range" class="range" data-field="el-opacity" min="0" max="100" value="${op}"><span class="value" data-op-value>${op}%</span></div>`);
@@ -1084,8 +1184,23 @@
     if (!e) return;
     const box = M.elBox(e);
     const v = +raw;
-    const keepRatio = e.kind === 'logo' || e.kind === 'image';
+    const keepRatio = e.kind === 'logo';
     switch (f) {
+      case 'radius': {
+        setEl(it, e.id, { radius: clamp(v, 0, 50) / 100 });
+        const o = propsEl.querySelector('[data-radius-value]');
+        if (o) o.textContent = Math.round(v) + '%';
+        break;
+      }
+      case 'zoom': {
+        setEl(it, e.id, clampCrop(e, { cz: clamp(v, 100, 400) / 100 }));
+        const o = propsEl.querySelector('[data-zoom-value]');
+        if (o) o.textContent = Math.round(v) + '%';
+        break;
+      }
+      case 'maskel':
+        if (!setMask(it, e, 'element', raw)) return;
+        break;
       case 'x':
         if (!final || !isFinite(v)) return;
         setEl(it, e.id, { x: v });
@@ -1123,7 +1238,7 @@
     updateElValues(it, getElement(it, e.id));
     if (final) {
       commit();
-      if (['fill', 'w', 'h', 'fit', 'weight', 'size'].includes(f)) renderProps();
+      if (['fill', 'w', 'h', 'fit', 'weight', 'size', 'maskel'].includes(f)) renderProps();
     }
   }
 
@@ -1193,7 +1308,12 @@
     const e = getElement(it, mEdit.el);
     switch (action) {
       case 'edit-done': exitMockupEdit(); return;
-      case 'el-select': mEdit.el = v; renderProps(); renderOverlay(); return;
+      case 'el-select':
+        mEdit.el = v;
+        if (mEdit.crop) setCrop(null);
+        renderProps();
+        renderOverlay();
+        return;
       case 'el-toggle': {
         const x = getElement(it, v);
         if (x) setEl(it, v, { hidden: !x.hidden });
@@ -1214,7 +1334,11 @@
           if (it.props.ov) delete it.props.ov[e.id];
         } else if (action === 'el-align') setEl(it, e.id, { align: v });
         else if (action === 'el-fill') setEl(it, e.id, { fill: v });
-        else if (action === 'el-fitmode') setEl(it, e.id, { fitMode: v });
+        else if (action === 'el-fitmode') setEl(it, e.id, clampCrop(e, { fitMode: v }));
+        else if (action === 'el-mask') { if (!setMask(it, e, v)) return; }
+        else if (action === 'el-crop') { setCrop(mEdit.crop === e.id ? null : e.id); return; }
+        else if (action === 'el-crop-reset') setEl(it, e.id, { cx: 0, cy: 0, cz: 1 });
+        else if (action === 'el-order') reorderElement(it, e.id, v);
         else if (action === 'el-replace') { $('#file-el-image').dataset.replace = e.id; $('#file-el-image').click(); return; }
         else if (action === 'el-fs') {
           const cur = M.elBox(e).size;
@@ -1302,6 +1426,18 @@
 
     if (mEdit) {
       const it = byId(mEdit.id);
+      if (mEdit.crop) {
+        // Cropping: any drag inside the mockup slides the picture; a click outside ends it.
+        const pic = getElement(it, mEdit.crop);
+        if (pic && itemEl && itemEl.dataset.id === mEdit.id) {
+          drag = { mode: 'crop-pan', start: toTpl(it, p), orig: { cx: pic.cx || 0, cy: pic.cy || 0 }, id: it.id, elId: pic.id, moved: false };
+          viewport.setPointerCapture(e.pointerId);
+          return;
+        }
+        setCrop(null);
+        commit();
+        return;
+      }
       if (handle && mEdit.el) {
         const el = getElement(it, mEdit.el);
         drag = { mode: 'el-resize', corner: handle.dataset.handle, start: toTpl(it, p), box: M.elBox(el), el, id: it.id };
@@ -1370,7 +1506,7 @@
       }
       return;
     }
-    if (drag.mode === 'el-move' || drag.mode === 'el-resize') { dragElement(e); return; }
+    if (drag.mode === 'el-move' || drag.mode === 'el-resize' || drag.mode === 'crop-pan') { dragElement(e); return; }
     if (drag.mode === 'pan') {
       state.view.x += e.clientX - drag.lx;
       state.view.y += e.clientY - drag.ly;
@@ -1434,6 +1570,14 @@
     const it = byId(drag.id);
     const q = toTpl(it, toWorld(e.clientX, e.clientY));
     const dx = q.x - drag.start.x, dy = q.y - drag.start.y;
+    if (drag.mode === 'crop-pan') {
+      drag.moved = true;
+      const pic = getElement(it, drag.elId);
+      setEl(it, drag.elId, clampCrop(pic, { cx: drag.orig.cx + dx, cy: drag.orig.cy + dy }));
+      renderItem(it);
+      renderOverlay();
+      return;
+    }
     if (drag.mode === 'el-move') {
       const px = it.w / M.templates[it.template].w * state.view.zoom;
       if (!drag.moved && Math.hypot(dx, dy) * px < 2) return;
@@ -1441,7 +1585,7 @@
       setEl(it, drag.elId, { x: r1(drag.orig.x + dx), y: r1(drag.orig.y + dy) });
     } else {
       const b = drag.box, c = drag.corner, el = drag.el;
-      const keep = el.kind === 'logo' || el.kind === 'text' || el.kind === 'image' || e.shiftKey;
+      const keep = el.kind === 'logo' || el.kind === 'text' || e.shiftKey;
       let w = b.w + (c[1] === 'w' ? -dx : dx);
       let h = b.h + (c[0] === 'n' ? -dy : dy);
       if (keep) { const s = Math.max(w / b.w, h / b.h); w = b.w * s; h = b.h * s; }
@@ -1467,7 +1611,7 @@
     const d = drag;
     drag = null;
     viewport.classList.remove('dragging', 'panning');
-    if (d.mode === 'el-move' || d.mode === 'el-resize') {
+    if (d.mode === 'el-move' || d.mode === 'el-resize' || d.mode === 'crop-pan') {
       if (d.mode === 'el-resize' || d.moved) commit();
       renderProps();
       renderOverlay();
@@ -1499,6 +1643,11 @@
         if (!mEdit || mEdit.id !== it.id) {
           const el = g && getElement(it, g.dataset.el);
           startMockupEdit(it.id, el && !el.locked ? el.id : null);
+        } else if (mEdit.crop) {
+          setCrop(null);
+          commit();
+        } else if (getElement(it, mEdit.el)?.kind === 'image') {
+          setCrop(mEdit.el);
         } else if (getElement(it, mEdit.el)?.kind === 'text') {
           const input = propsEl.querySelector('[data-field="el-text"]');
           if (input) { input.focus(); input.select(); }
@@ -1623,6 +1772,17 @@
     if (mEdit) {
       const it = byId(mEdit.id);
       const el = getElement(it, mEdit.el);
+      if (mEdit.crop && (e.key === 'Escape' || e.key === 'Enter')) {
+        e.preventDefault();
+        setCrop(null);
+        commit();
+        return;
+      }
+      if ((e.key === ']' || e.key === '[') && el && !el.locked) {
+        reorderElement(it, el.id, e.key === ']' ? 'forward' : 'backward');
+        afterElChange(it);
+        return;
+      }
       if (e.key === 'Escape') {
         if (mEdit.el) { mEdit.el = null; renderProps(); renderOverlay(); } else exitMockupEdit();
         return;
@@ -1716,7 +1876,8 @@
       const it = byId(mEdit.id);
       const el = getElement(it, replaceId);
       const { src, w, h } = await importImage(files[0], 2000);
-      setEl(it, replaceId, { src: addAsset(src), h: r1(el.w * h / w) });
+      if (!el) return;
+      setEl(it, replaceId, { src: addAsset(src), ar: w / h, cx: 0, cy: 0, cz: 1 });
       afterElChange(it);
     } catch {
       toast('이미지를 불러오지 못했어요');
